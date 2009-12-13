@@ -1,0 +1,228 @@
+\input texinfo                  @c -*-texinfo-*-
+
+@setfilename expect
+@settitle expect
+@synindex fn cp
+@synindex vr cp
+@synindex pg cp
+@iftex
+@finalout
+@end iftex
+@setchapternewpage odd
+
+@node Top
+@top Expect
+
+Things.
+
+@menu
+* Expect::
+@end menu
+
+
+@node Expect
+@chapter Expect
+
+@cindex process communication
+@cindex asynchronous processes
+The Expect package provides macros and functions to ease writing
+functions that respond to output from external processes. 
+
+The basic building block is the @code{expect} macro:
+
+@lisp
+(expect "login:"
+  (message "I'm now logging in")
+  (expect-send "dworkin"))
+@end lisp
+
+This means that the body of this form will be executed when text that
+matches the given regular expression has arrived.
+
+Here's a typical example function that starts @code{telnet} and logs
+into a machine and does an @samp{ls} there:
+
+@findex expect
+@findex with-expect
+@findex with-expect-asynchronous
+@lisp
+(defun test-login ()
+  "Log in to a machine."
+  (pop-to-buffer "*my-telnet*")
+  (let* ((expect-start (point-max))
+         (process (start-process "telnet" (current-buffer) "telnet")))
+    (with-expect process
+      (expect "telnet>"
+        (expect-send "open nephecoccygia.com"))
+      (expect "login:"
+        (expect-send "dworkin"))
+      (expect "assword:"
+        (expect-send "censored"))
+      (expect ">$"
+        (expect-send "ls")
+        (expect ">$"
+          (expect-send "logout"))))))
+@end lisp
+
+The @code{expect} macro is only valid inside the body of one of the
+@code{with-expect} macros, of which there are two.  @code{expect} calls
+can be nested arbitrarily deep.
+
+@code{with-expect} will make each @code{expect} form wait for text to
+match the specified regexp to arrive before executing the forms in the
+body and returning.  @code{with-expect-asynchronous} will make each
+@code{expect} return immediately without waiting for text and without
+executing the forms in the body.  Instead, the body will be executed at
+a later time---after the specified text has arrived.
+
+Non-@code{expect} forms inside @code{with-expect} and
+@code{with-expect-asynchronous} bodies will always be executed in the
+normal, synchronous fashion.
+
+The first parameter to both of these macros says what process to wait
+for output from.  This parameter can be:
+
+@itemize @var
+@item
+A string.  This string will be interpreted as a shell command to
+start.
+
+@item
+A list of strings.  The first element in the list will be
+interpreted as a shell command to be started, and the rest will be given
+as parameters to this command.
+
+@item
+A process handle (@pxref{(elisp)Processes}).  Expect will then connect
+to this existing process.
+@end itemize
+
+If the parameter specifies a new command to be started, Expect will
+start this process in a new, fresh temporary buffer.  This buffer will
+be killed automatically when Expect has finished talking to the process.
+If the parameter specifies an existing process, no new buffer will be
+created, and Expect won't kill the buffer after finishing.
+
+It is often convenient to be able to wait until a process exits before
+doing something with the output from that process.  The
+@code{expect-exit} form can be used to achieve this:
+
+@findex expect-exit
+@lisp
+(defun du (dir)
+  "Get output from ls."
+  (interactive "DDirectory: ")
+  (with-expect (list "du" (expand-file-name dir))
+    (expect-exit
+      (let ((buf (current-buffer)))
+        (save-selected-window
+          (pop-to-buffer "*du*")
+          (erase-buffer)
+          (insert-buffer-substring buf)
+          (goto-char (point-min)))))))
+@end lisp
+
+@code{expect-exit} is just like @code{expect}, only that it waits for
+the process to finish instead of waiting for a particular string.  You
+can have as many of these functions as you want; they'll all be executed
+(in the order they appear textually) when the process exits.
+
+As @code{with-expect-asynchronous} is used in this example, calling the
+@code{du} function will return immediately, and you can continue using
+Emacs as normal.  When the @samp{du} command has finished, a new buffer
+will be popped up and the results from the @samp{du} will be displayed
+there.
+
+The output from processes is often hard to predict.  To help deal with
+these situations, Expect provides the @code{expect-cond} form.  Here's
+an example:
+
+@lisp
+(defun test-login ()
+  "Log in to a machine."
+  (pop-to-buffer "*my-telnet*")
+  (with-expect-asynchronous "telnet"
+    (expect "telnet>"
+      (expect-send "open localhost"))
+    (expect-cond
+     ("Go away"
+      (message "We aren't allowed to log in")
+      (ding)
+      (expect-cancel))
+     ("login:" (expect-send "dworkin")))
+    (expect "assword:"
+      (expect-send "censored"))
+    (expect ">$"
+      (expect-send "ls"))
+    (expect-cond
+     (">$" (expect-send "logout"))
+     ((timeout 10)
+      (message "Hey!  We timed out!")
+      (expect-cancel)))
+    (expect-exit
+      (message "Mission completed"))))
+@end lisp
+
+The @code{expect-cond} form look very similar to @code{cond} form.  It
+will try each clause (in the order they're listed) looking for a match.
+Each clause looks like @var{(condition forms ...)}, where @var{forms}
+will be executed if @var{condition} is true.  Valid conditions are
+strings (which will be interpreted as regexps, and will be ``true'' when
+matching text arrives; @code{(timeout SECONDS)} which will be ``true''
+when more time has passed than was specified by the @var{seconds}
+parameter; the process status symbols (@code{run}, @code{stop},
+@code{exit}, @code{signal}, @code{open}, and @code{closed}) which will
+be ``true'' if the process enters these states; and @code{t} which will
+always be ``true''.  No other conditions are valid.
+
+Expect is implemented using process filters and process sentinels.  You
+can have arbitrarily many asynchronous Expects running at the same time.
+
+There are two variables that can be bound to affect how the
+@code{with-expect} and @code{with-expect-asynchronous} forms work.  The
+normal way to use these are to bind them (with a @code{let} form).
+Setting them globally is strongly discouraged.
+
+The variables are:
+
+@table @code
+@item expect-message
+@vindex expect-message
+If this variable is bound to a non-@code{nil} value, the Expect process
+filter will issue an @samp{Expect received %d characters} message
+whenever new text arrives.
+
+@item expect-start
+@vindex expect-start
+When you're using @code{with-expect} (i. e., with a process that has
+already started), Expect has to know where to start searching for the
+regexp from.  By default, it searches from the beginning of the buffer,
+but if you bind @code{expect-start} to a numerical value, it'll use that
+instead as the starting point.  This is demonstrated in the
+@code{test-login} example above.
+
+@end table
+
+Finally, Expect provides some utility functions:
+
+@table @code
+@findex expect-send
+@item expect-send
+This function takes one parameter, a string.  It'll be sent to the
+current process with a newline character appended.
+
+@findex expect-send-string
+@item expect-send-string
+This does the same as the function above, but a newline won't be
+appended.
+
+@findex expect-cancel
+@item expect-cancel
+Cancel all expect forms specified by the enclosing @code{with-expect}
+form. 
+@end table
+
+These functions are only valid inside @code{expect}, @code{expect-cond},
+and @code{expect-exit} forms.
+
+@c End:
